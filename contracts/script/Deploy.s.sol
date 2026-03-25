@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Script, console} from "forge-std/Script.sol";
+import {BaseERC20} from "../src/BaseERC20.sol";
+import {NFTMarket} from "../src/NFTMarket.sol";
+import {SimpleNFT} from "../src/SimpleNFT.sol";
+
+contract DeployScript is Script {
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY_TEST");
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // Deploy BaseERC20 token with 1 million initial supply (18 decimals)
+        BaseERC20 token = new BaseERC20("Market Token", "MTK", 1_000_000 * 10**18);
+
+        // Deploy SimpleNFT
+        SimpleNFT simpleNFT = new SimpleNFT();
+
+        // Deploy NFTMarket with token address
+        NFTMarket nftMarket = new NFTMarket(address(token));
+
+        vm.stopBroadcast();
+
+        console.log("\n=== Deployment Complete ===");
+        console.log("BaseERC20:", address(token));
+        console.log("SimpleNFT:", address(simpleNFT));
+        console.log("NFTMarket:", address(nftMarket));
+    }
+}
