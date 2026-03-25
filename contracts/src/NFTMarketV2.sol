@@ -23,6 +23,7 @@ contract NFTMarketV2 is ReentrancyGuard, Ownable {
     struct Bid {
         address bidder;
         uint256 amount;
+        uint256 timestamp; // bid 创建时间（用于过期判定）
     }
 
     // 用于支付的 ERC20 代币
@@ -40,6 +41,9 @@ contract NFTMarketV2 is ReentrancyGuard, Ownable {
     uint256 public constant MAX_FEE_BPS = 1000; // 10%
     uint256 public constant DEFAULT_FEE_BPS = 250; // 2.5%
 
+    // 出价有效期（秒），到期后卖家不能接受该出价；出价人仍可取消领取
+    uint256 public bidExpirySeconds;
+
     // 事件
     event NFTListed(uint256 indexed listingId, address indexed seller, address indexed nftContract, uint256 tokenId, uint256 price);
     event NFTPurchased(uint256 indexed listingId, address indexed buyer, address indexed seller, uint256 price);
@@ -49,11 +53,13 @@ contract NFTMarketV2 is ReentrancyGuard, Ownable {
     event BidPlaced(uint256 indexed listingId, address indexed bidder, uint256 amount);
     event BidCancelled(uint256 indexed listingId, address indexed bidder, uint256 amount);
     event BidAccepted(uint256 indexed listingId, address indexed seller, address indexed bidder, uint256 amount);
+    event BidExpirySecondsUpdated(uint256 oldExpirySeconds, uint256 newExpirySeconds);
 
     constructor(address _paymentToken) Ownable(msg.sender) {
         require(_paymentToken != address(0), "Invalid token address");
         paymentToken = IERC20(_paymentToken);
         feeRateBps = DEFAULT_FEE_BPS;
+        bidExpirySeconds = 1 days;
     }
 
     /**
@@ -134,6 +140,26 @@ contract NFTMarketV2 is ReentrancyGuard, Ownable {
         listing.price = newPrice;
 
         emit ListingPriceUpdated(listingId, oldPrice, newPrice);
+    }
+
+    /**
+     * @notice 设置出价有效期（秒）
+     * @param newExpirySeconds 新的有效期（秒）
+     */
+    function setBidExpirySeconds(uint256 newExpirySeconds) external onlyOwner {
+        require(newExpirySeconds > 0, "Expiry must be > 0");
+        uint256 old = bidExpirySeconds;
+        bidExpirySeconds = newExpirySeconds;
+        emit BidExpirySecondsUpdated(old, newExpirySeconds);
+    }
+
+    /**
+     * @notice 查询出价是否过期
+     */
+    function isBidExpired(uint256 listingId) public view returns (bool) {
+        Bid memory b = highestBids[listingId];
+        if (b.amount == 0) return false;
+        return block.timestamp >= b.timestamp + bidExpirySeconds;
     }
 
     /**
@@ -242,7 +268,11 @@ contract NFTMarketV2 is ReentrancyGuard, Ownable {
             require(paymentToken.transfer(currentBid.bidder, currentBid.amount), "Refund failed");
         }
 
-        highestBids[listingId] = Bid({bidder: msg.sender, amount: amount});
+        highestBids[listingId] = Bid({
+            bidder: msg.sender,
+            amount: amount,
+            timestamp: block.timestamp
+        });
         emit BidPlaced(listingId, msg.sender, amount);
     }
 
@@ -257,6 +287,7 @@ contract NFTMarketV2 is ReentrancyGuard, Ownable {
 
         Bid memory currentBid = highestBids[listingId];
         require(currentBid.amount > 0, "No bid");
+        require(!isBidExpired(listingId), "Bid expired");
 
         // 先结束挂单并清空最高出价，防止重入
         listing.active = false;

@@ -250,4 +250,49 @@ contract NFTMarketV2Test is Test {
         vm.expectRevert("Not bidder");
         market.cancelBid(listingId);
     }
+
+    function testRevertAcceptHighestBidIfExpired() public {
+        vm.prank(seller);
+        uint256 listingId = market.listNFT(address(nft), tokenId0, 1_000 ether);
+
+        // shorten expiry
+        vm.prank(address(this));
+        market.setBidExpirySeconds(10);
+
+        vm.startPrank(bidder1);
+        token.approve(address(market), type(uint256).max);
+        market.placeBid(listingId, 1_000 ether);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 11);
+
+        vm.prank(seller);
+        vm.expectRevert("Bid expired");
+        market.acceptHighestBid(listingId);
+    }
+
+    function testCancelBidAfterExpiredRefunds() public {
+        vm.prank(seller);
+        uint256 listingId = market.listNFT(address(nft), tokenId0, 1_000 ether);
+
+        vm.prank(address(this));
+        market.setBidExpirySeconds(10);
+
+        uint256 bidderBefore = token.balanceOf(bidder1);
+
+        vm.startPrank(bidder1);
+        token.approve(address(market), type(uint256).max);
+        market.placeBid(listingId, 400 ether);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 11);
+
+        vm.prank(bidder1);
+        market.cancelBid(listingId);
+
+        assertEq(token.balanceOf(bidder1), bidderBefore);
+        NFTMarketV2.Bid memory bid = market.getHighestBid(listingId);
+        assertEq(bid.bidder, address(0));
+        assertEq(bid.amount, 0);
+    }
 }

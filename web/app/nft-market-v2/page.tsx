@@ -35,6 +35,7 @@ type ListingStruct = {
 type BidStruct = {
   bidder: `0x${string}`;
   amount: bigint;
+  timestamp: bigint;
 };
 
 function normalizeListing(r: any): {
@@ -66,11 +67,20 @@ function normalizeListing(r: any): {
 function normalizeBid(r: any): {
   bidder?: `0x${string}`;
   amount?: bigint;
+  timestamp?: bigint;
 } {
   if (Array.isArray(r)) {
-    return { bidder: r[0] as `0x${string}`, amount: r[1] as bigint };
+    return {
+      bidder: r[0] as `0x${string}`,
+      amount: r[1] as bigint,
+      timestamp: r[2] as bigint,
+    };
   }
-  return { bidder: r?.bidder as `0x${string}`, amount: r?.amount as bigint };
+  return {
+    bidder: r?.bidder as `0x${string}`,
+    amount: r?.amount as bigint,
+    timestamp: r?.timestamp as bigint,
+  };
 }
 
 function shortAddr(a: string) {
@@ -151,6 +161,20 @@ export default function NFTMarketV2Page() {
     query: { enabled: !!marketAddress },
   });
 
+  const { data: bidExpirySeconds } = useReadContract({
+    address: marketAddress || undefined,
+    abi: marketAbi,
+    functionName: 'bidExpirySeconds',
+    query: { enabled: !!marketAddress },
+  });
+
+  const { data: marketOwner } = useReadContract({
+    address: marketAddress || undefined,
+    abi: marketAbi,
+    functionName: 'owner',
+    query: { enabled: !!marketAddress },
+  });
+
   const counterNum = listingCounter != null ? Number(listingCounter as bigint) : 0;
   const scanCount = Math.min(counterNum, MAX_LISTING_SCAN);
 
@@ -199,6 +223,7 @@ export default function NFTMarketV2Page() {
   const [bidInputs, setBidInputs] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expiryInput, setExpiryInput] = useState<string>('');
 
   const listings = useMemo(() => {
     const rows: {
@@ -227,13 +252,13 @@ export default function NFTMarketV2Page() {
   }, [listingResults]);
 
   const bidsByListingId = useMemo(() => {
-    const map: Record<number, { bidder: string; amount: bigint }> = {};
+    const map: Record<number, { bidder: string; amount: bigint; timestamp: bigint }> = {};
     if (!bidResults) return map;
     bidResults.forEach((res, i) => {
       if (res.status !== 'success' || res.result == null) return;
       const r = normalizeBid(res.result) as Partial<BidStruct>;
       if (!r.bidder || r.amount == null) return;
-      map[i] = { bidder: r.bidder, amount: r.amount };
+      map[i] = { bidder: r.bidder, amount: r.amount, timestamp: (r.timestamp ?? 0n) as bigint };
     });
     return map;
   }, [bidResults]);
@@ -246,6 +271,9 @@ export default function NFTMarketV2Page() {
       (l) => l.seller.toLowerCase() === address.toLowerCase()
     );
   }, [activeListings, address]);
+
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  const bidExpiry = bidExpirySeconds != null ? (bidExpirySeconds as bigint) : 0n;
 
   const ensureErc20Allowance = async (min: bigint) => {
     if (!address || !paymentTokenAddress || !marketAddress || !publicClient) {
@@ -496,6 +524,42 @@ export default function NFTMarketV2Page() {
     }
   };
 
+  const handleSetBidExpiry = async () => {
+    if (!marketAddress) return;
+    setError(null);
+    const next = expiryInput.trim();
+    if (!next) {
+      setError('Please input expiry seconds');
+      return;
+    }
+    let nextVal: bigint;
+    try {
+      nextVal = BigInt(next);
+    } catch {
+      setError('Invalid expiry seconds');
+      return;
+    }
+    if (nextVal <= 0n) {
+      setError('Expiry must be > 0');
+      return;
+    }
+    setStatus('Confirm set bid expiry…');
+    try {
+      await writeContractAsync({
+        address: marketAddress,
+        abi: marketAbi,
+        functionName: 'setBidExpirySeconds',
+        args: [nextVal],
+      });
+      setStatus('Bid expiry updated.');
+      setExpiryInput('');
+      await refreshAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Update failed');
+      setStatus(null);
+    }
+  };
+
   const fillSimpleNft = () => {
     if (simpleNftAddress) {
       setListNft((p) => ({ ...p, contract: simpleNftAddress }));
@@ -689,6 +753,12 @@ export default function NFTMarketV2Page() {
                       !!address &&
                       bid.bidder.toLowerCase() === address.toLowerCase() &&
                       bid.amount > 0n;
+                    const isBidExpired =
+                      !!bid &&
+                      bid.amount > 0n &&
+                      bid.timestamp > 0n &&
+                      bidExpiry > 0n &&
+                      nowSec >= bid.timestamp + bidExpiry;
 
                     return (
                       <div
@@ -708,6 +778,13 @@ export default function NFTMarketV2Page() {
                             <p className="text-sm text-purple-800">
                               High bid: {formatUnits(bid.amount, TOKEN_DECIMALS)} MTK (
                               {shortAddr(bid.bidder)})
+                              {isBidExpired ? (
+                                <span className="ml-2 text-red-700 font-medium">(Expired)</span>
+                              ) : (
+                                <span className="ml-2 text-amber-700 font-medium">
+                                  (Expires in {(bid.timestamp + bidExpiry - nowSec).toString()}s)
+                                </span>
+                              )}
                             </p>
                           ) : (
                             <p className="text-sm text-gray-500">No bids yet</p>
@@ -750,11 +827,13 @@ export default function NFTMarketV2Page() {
                             <>
                               <button
                                 type="button"
-                                disabled={isWritePending || !bid || bid.amount === 0n}
+                                disabled={
+                                  isWritePending || !bid || bid.amount === 0n || isBidExpired
+                                }
                                 onClick={() => void handleAcceptBid(l.id)}
                                 className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm disabled:opacity-50"
                               >
-                                Accept highest bid
+                                {isBidExpired ? 'Bid expired' : 'Accept highest bid'}
                               </button>
                               <button
                                 type="button"
@@ -810,7 +889,36 @@ export default function NFTMarketV2Page() {
             <li>• <strong>Bids:</strong> ERC20 is held in escrow until outbid, sale, or you withdraw / listing ends.</li>
             <li>• <strong>Buy:</strong> Approves MTK if needed, then transfers list price + fee.</li>
             <li>• <strong>Batch list:</strong> Multiple NFTs in one transaction (same rules as single list).</li>
+            <li>• <strong>Bid expiry:</strong> Seller can not accept an expired bid. Current: {bidExpiry.toString()}s.</li>
           </ul>
+
+          {marketOwner && address && marketOwner.toLowerCase() === address.toLowerCase() && (
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Set bid expiry seconds
+                </label>
+                <input
+                  type="text"
+                  value={expiryInput}
+                  onChange={(e) => setExpiryInput(e.target.value)}
+                  placeholder="e.g. 86400"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <button
+                type="button"
+                disabled={isWritePending}
+                onClick={() => void handleSetBidExpiry()}
+                className="w-full sm:w-auto px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg disabled:opacity-50"
+              >
+                Update expiry
+              </button>
+              <div className="text-xs text-gray-500">
+                Only contract owner can update.
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
